@@ -58,15 +58,26 @@ TOBOOT_CONFIGURATION(0);
 #define LED_RED_PIN    GPIO7
 
 volatile uint32_t system_millis = 0;
+volatile uint32_t delay = 100;
+volatile uint32_t diff = 1;
 
 void sys_tick_handler(void) {
-
     ++system_millis;
 
     /* Every 100ms, toggle the LEDs */
-    if(system_millis % 100 == 0) {
-        gpio_toggle(LED_RED_PORT, LED_RED_PIN);
-        gpio_toggle(LED_GREEN_PORT, LED_GREEN_PIN);
+    if(system_millis % delay != 0) {
+        return;
+    }
+
+    gpio_toggle(LED_RED_PORT, LED_RED_PIN);
+    /*gpio_toggle(LED_GREEN_PORT, LED_GREEN_PIN);*/
+
+    delay += diff;
+
+    if (delay >= 100) {
+        diff = -1;
+    } else if (delay <= 50) {
+        diff = 1;
     }
 }
 

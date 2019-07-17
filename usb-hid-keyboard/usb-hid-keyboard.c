@@ -40,6 +40,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <toboot.h>
+#include "file.h"
+
+TOBOOT_CONFIGURATION(TOBOOT_CONFIG_FLAG_AUTORUN);
+
 /* Systick interrupt frequency, Hz */
 #define SYSTICK_FREQUENCY 100
 
@@ -55,12 +60,27 @@
 #define PRODUCT_ID                0x70b1    /* Assigned to Tomu project */
 #define DEVICE_VER                0x0101    /* Program version */
 
+
 // Declare injectkeys function
-void injkeys(char *source,uint8_t mod);
+void injkeys(char *source, uint8_t mod);
+void execute_frame();
 
 bool g_usbd_is_connected = false;
-bool once=true;
+bool once = true;
 usbd_device *g_usbd_dev = 0;
+
+typedef enum injectState {
+	state_IDLE,
+	state_START_INJECT,
+	state_INJECTING,
+	state_KEY_DOWN,
+	state_KEY_UP,
+	state_MOD_DOWN,
+	state_MOD_KEY_DOWN,
+	state_MOD_KEY_UP,
+	state_MOD_UP,
+	state_WAIT
+} injectState_t;
 
 static const struct usb_device_descriptor dev_descr = {
 	.bLength = USB_DT_DEVICE_SIZE,
@@ -201,6 +221,20 @@ static enum usbd_request_return_codes hid_control_request(usbd_device *dev, stru
 	return 1;
 }
 
+void hid_keydown(char key)
+{
+	static uint8_t buf[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    buf[2] = key;
+    usbd_ep_write_packet(g_usbd_dev, 0x81, buf, 8);
+}
+
+void hid_keyup(char key)
+{
+    (void) key;
+    static uint8_t buf[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    usbd_ep_write_packet(g_usbd_dev, 0x81, buf, 8);
+}
+
 static void hid_set_config(usbd_device *dev, uint16_t wValue)
 {
 	(void)wValue;
@@ -208,11 +242,11 @@ static void hid_set_config(usbd_device *dev, uint16_t wValue)
 
 	usbd_ep_setup(dev, 0x81, USB_ENDPOINT_ATTR_INTERRUPT, 8, NULL);
 
-	usbd_register_control_callback(
-				dev,
-				USB_REQ_TYPE_STANDARD | USB_REQ_TYPE_INTERFACE,
-				USB_REQ_TYPE_TYPE | USB_REQ_TYPE_RECIPIENT,
-				hid_control_request);
+    usbd_register_control_callback(
+            dev,
+            USB_REQ_TYPE_STANDARD | USB_REQ_TYPE_INTERFACE,
+            USB_REQ_TYPE_TYPE | USB_REQ_TYPE_RECIPIENT,
+            hid_control_request);
 }
 
 void usb_isr(void)
@@ -227,54 +261,152 @@ void hard_fault_handler(void)
 
 void sys_tick_handler(void)
 {
-    if(g_usbd_is_connected && once) {
-
-	for(int i = 0; i != 3500000; ++i) __asm__("nop");  // wait before keys injection
-	injkeys("this is an example of key injection 0123456789",0);
-	injkeys(" . . ",0); // Can't send two consecutive identical caracters ...
-	injkeys("this is an example of key injection 0123456789",2);
-	once=false;
+    if (!g_usbd_is_connected || !once) {
+        return;
     }
+    for(int i = 0; i != 3500000; ++i) __asm__("nop");  // wait before keys injection
+
+    // TODO: Add button catch before starting the script
+
+    /*injkeys("this is an example of key injection 0123456789",0);*/
+    /*injkeys(" . . ", 0); // Can't send two consecutive identical caracters ...*/
+    /*injkeys("this is an example of key injection 0123456789",2);*/
+
+    once = false;
+
+    while (!file_eof()) {
+        execute_frame();
+    }
+}
+
+void execute_frame()
+{
+	static injectState_t state = state_START_INJECT;
+	static uint8_t wait = 0;
+	static uint16_t injectToken = 0x0000;
+    int i = 0;
+	
+	switch(state) {
+		case state_IDLE:
+            // TODO: Blink the LED a couple of times
+			break;		
+			
+		case state_START_INJECT:
+			file_open();
+			state = state_INJECTING;
+			break;
+			
+		case state_INJECTING:				
+			if (file_eof()) {
+				file_close();	
+				state = state_IDLE;
+				break;
+			}
+			
+			injectToken = (file_getc() | (file_getc() << 8));			
+						
+			if ((injectToken & 0xff) == 0x00) {				
+				wait = injectToken>>8;
+				state = state_WAIT;
+			} else if ((injectToken >> 8) == 0x00) {
+				state = state_KEY_DOWN;
+			} else {
+				state = state_MOD_DOWN;					
+			}					
+			break;
+			
+		case state_KEY_DOWN:
+			hid_keydown(injectToken & 0xff);
+
+            for(i = 0; i != 150; ++i) __asm__("nop");
+            hid_keyup(injectToken & 0xff);
+
+            for(i = 0; i != 1500000; ++i)
+                __asm__("nop");
+			state = state_INJECTING;
+			break;
+
+		case state_KEY_UP:
+			hid_keyup(injectToken & 0xff);
+			state = state_INJECTING;
+
+            // Spin for a few cycles
+            for(i = 0; i != 1500000; ++i)
+                __asm__("nop");
+			break;			
+			
+		/*case state_MOD_DOWN:*/
+			/*udi_hid_kbd_modifier_down(injectToken>>8);*/
+			/*state = state_MOD_KEY_DOWN;*/
+			/*break;*/
+
+		/*case state_MOD_KEY_DOWN:*/
+			/*udi_hid_kbd_down(injectToken&0xff);*/
+			/*state = state_MOD_KEY_UP;*/
+			/*break;*/
+
+		/*case state_MOD_KEY_UP:*/
+			/*udi_hid_kbd_up(injectToken&0xff);*/
+			/*state = state_MOD_UP;		*/
+			/*break;*/
+			
+		/*case state_MOD_UP:*/
+			/*udi_hid_kbd_modifier_up(injectToken>>8);*/
+			/*state = state_INJECTING;*/
+			/*break;	*/
+			
+		case state_WAIT:
+			if( --wait == 0 ) {
+				state = state_INJECTING;
+			}
+			break;
+			
+		default:
+			state = state_IDLE;
+	}
 }
 
 // HID Usage Tables
 // https://www.usb.org/sites/default/files/documents/hut1_12v2.pdf
 
-void injkeys(char *source,uint8_t mod)
+void injkeys(char *source, uint8_t mod)
 {
 	static uint8_t buf[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // key pressed
 	static uint8_t buf2[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // Key released
+
+    if (!g_usbd_is_connected) {
+        return;
+    }
+
 	int i;
-	if(g_usbd_is_connected) {
-	buf[0]=mod; // Key modifier, 2=LeftShift
+    buf[0] = mod; // Key modifier, 2=LeftShift
 
-	int lstr=strlen(source);
-	// change ascii to keyboard map
-	for (int j = 0; j < lstr; j++){
-		if(source[j]>48&&source[j]<58) // numbers 1-9
-			buf[2]=source[j]-19;
-		else if (source[j]==48) // number 0
-			buf[2]=39;
-		else if (source[j]==32) // space bar
-			buf[2]=44;
-		else if(source[j]==46) // .
-			buf[2]=55;
-		else
-			buf[2]=source[j]-93; // lowercase letters
+    int lstr = strlen(source);
+    // change ascii to keyboard map
+    for (int j = 0; j < lstr; j++) {
+        if(source[j] > 48 && source[j] < 58) // numbers 1-9
+            buf[2] = source[j] -19;
+        else if (source[j] == 48) // number 0
+            buf[2] = 39;
+        else if (source[j] == 32) // space bar
+            buf[2] = 44;
+        else if(source[j] == 46) // .
+            buf[2] = 55;
+        else
+            buf[2] = source[j] - 93; // lowercase letters
 
-		usbd_ep_write_packet(g_usbd_dev, 0x81, buf, 8);
-		for(i = 0; i != 150; ++i) __asm__("nop");
-		usbd_ep_write_packet(g_usbd_dev, 0x81, buf2, 8);
-        	for(i = 0; i != 150000; ++i) //Wait a little
-				__asm__("nop");
+        usbd_ep_write_packet(g_usbd_dev, 0x81, buf, 8);
+        for(i = 0; i != 150; ++i) __asm__("nop");
+        usbd_ep_write_packet(g_usbd_dev, 0x81, buf2, 8);
+        for(i = 0; i != 150000; ++i) //Wait a little
+            __asm__("nop");
 
-  	}
-		usbd_ep_write_packet(g_usbd_dev, 0x81, buf2, 8); // Be sure key is released
-        	for(i = 0; i != 150000; ++i) //Wait a little
-				__asm__("nop");
- }
-
+    }
+    usbd_ep_write_packet(g_usbd_dev, 0x81, buf2, 8); // Be sure key is released
+    for(i = 0; i != 150000; ++i) //Wait a little
+        __asm__("nop");
 }
+
 int main(void)
 {
     int i;
